@@ -12,22 +12,27 @@ import torch.nn.functional as F
 import torch.utils.data as data
 import torchvision.transforms as transforms
 import torchvision.models as models
+from sklearn.metrics import roc_auc_score
 
-train_lib = '/notebooks/19_ZZQ/MIL-nature-medicine-2019/data_preprocess/train_3.pki'
-val_lib = '/notebooks/19_ZZQ/MIL-nature-medicine-2019/data_preprocess/val_3.pki'
-output = '.'
+resolution = 3
+
+train_lib = '/notebooks/19_ZZQ/MIL-nature-medicine-2019/data_preprocess/train_' + str(resolution) + '.pki'
+val_lib = '/notebooks/19_ZZQ/MIL-nature-medicine-2019/data_preprocess/val_' + str(resolution) + '.pki'
+output = str(resolution)
 batch_size = 32
 nepochs = 100
-workers = 1
+workers = 0
 test_every = 10
 weights = 0.5
-k = 1
+k = 10
 
 best_acc = 0
 
 class MILdataset(data.Dataset):
     def __init__(self, libraryfile='', transform=None):
         lib = torch.load(libraryfile)
+        for key in lib.keys():
+            lib[key] = lib[key]
         slides = []
         for i,name in enumerate(lib['slides']):
             sys.stdout.write('Opening SVS headers: [{}/{}]\r'.format(i+1, len(lib['slides'])))
@@ -49,8 +54,8 @@ class MILdataset(data.Dataset):
         self.slideIDX = slideIDX
         self.transform = transform
         self.mode = None
-        self.mult = lib['mult']
-        self.size = int(np.round(224*lib['mult'][0]))
+        self.mult = 1
+        self.size = int(np.round(224*1))
         self.level = lib['level']
     def setmode(self,mode):
         self.mode = mode
@@ -62,7 +67,7 @@ class MILdataset(data.Dataset):
     def __getitem__(self,index):
         if self.mode == 1:
             slideIDX = self.slideIDX[index]
-            coord = self.grid[index]
+            coord = (self.grid[index][0] * 2 ** resolution, self.grid[index][1] * 2 ** resolution)
             img = self.slides[slideIDX].read_region(coord,self.level[0],(self.size,self.size)).convert('RGB')
             if self.mult != 1:
                 img = img.resize((224,224),Image.BILINEAR)
@@ -71,6 +76,7 @@ class MILdataset(data.Dataset):
             return img
         elif self.mode == 2:
             slideIDX, coord, target = self.t_data[index]
+            coord = (coord[0] * 2 ** resolution, coord[1] * 2 ** resolution)
             img = self.slides[slideIDX].read_region(coord,self.level[0],(self.size,self.size)).convert('RGB')
             if self.mult != 1:
                 img = img.resize((224,224),Image.BILINEAR)
@@ -90,8 +96,8 @@ def inference(run, loader, model):
         for i, input in enumerate(loader):
             print('Inference\tEpoch: [{}/{}]\tBatch: [{}/{}]'.format(run+1, nepochs, i+1, len(loader)))
             input = input.cuda()
-            output = F.softmax(model(input), dim=1)
-            probs[i*batch_size:i*batch_size+input.size(0)] = output.detach()[:,1].clone()
+            output = F.softmax(model(input), dim=1) # 算出的output是二维的，也就是说每个图像的结果是一个(a, b)这样的tensor
+            probs[i*batch_size:i*batch_size+input.size(0)] = output.detach()[:,1].clone() # detach及后面的把(a,b)变成a
     return probs.cpu().numpy()
 
 def train(run, loader, model, criterion, optimizer):
@@ -112,12 +118,12 @@ def calc_err(pred,real):
     pred = np.array(pred)
     real = np.array(real)
     neq = np.not_equal(pred, real)
-    err = float(neq.sum())/pred.shape[0]
-    fpr = float(np.logical_and(pred==1,neq).sum())/(real==0).sum()
-    fnr = float(np.logical_and(pred==0,neq).sum())/(real==1).sum()
+    err = float(neq.sum())/pred.shape[0] # 判断错误的除以总的判断的
+    fpr = float(np.logical_and(pred==1,neq).sum())/(real==0).sum() # 假阳性：预测为阳性且判断错误除以总共有多少阴性
+    fnr = float(np.logical_and(pred==0,neq).sum())/(real==1).sum() # 假阴性：预测为阴性且判断错误除以总共有多少阳性
     return err, fpr, fnr
 
-def group_argtopk(groups, data,k=1):
+def group_argtopk(groups, data, k):
     order = np.lexsort((data, groups))
     groups = groups[order]
     data = data[order]
@@ -133,8 +139,8 @@ def group_max(groups, data, nmax):
     groups = groups[order]
     data = data[order]
     index = np.empty(len(groups), 'bool')
-    index[-1] = True
-    index[:-1] = groups[1:] != groups[:-1]
+    index[-k] = True
+    index[:-k] = groups[k:] != groups[:-k]
     out[groups[index]] = data[index]
     return out
 
@@ -145,10 +151,10 @@ model.fc = nn.Linear(model.fc.in_features, 2)
 model.cuda()
 
 if weights==0.5:
-    criterion = nn.CrossEntropyLoss()#.cuda()
+    criterion = nn.CrossEntropyLoss().cuda()
 else:
     w = torch.Tensor([1-weights,weights])
-    criterion = nn.CrossEntropyLoss(w)#.cuda()
+    criterion = nn.CrossEntropyLoss(w).cuda()
 optimizer = optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-4)
 
 cudnn.benchmark = True
@@ -170,6 +176,8 @@ if val_lib:
         num_workers=workers, pin_memory=False)
 
 #open output file
+if str(resolution) not in os.listdir('.'):
+    os.mkdir(str(resolution))
 fconv = open(os.path.join(output,'convergence.csv'), 'w')
 fconv.write('epoch,metric,value\n')
 fconv.close()
@@ -178,7 +186,7 @@ fconv.close()
 for epoch in range(nepochs):
     train_dset.setmode(1)
     probs = inference(epoch, train_loader, model)
-    topk = group_argtopk(np.array(train_dset.slideIDX), probs, k) #挑选出每个slide中是阳性的概率最高的k个tils
+    topk = group_argtopk(np.array(train_dset.slideIDX), probs, k) #挑选出每个slide中是阳性的概率最高的k个tiles
     train_dset.maketraindata(topk)
     train_dset.shuffletraindata() # 挑出来后打乱
     train_dset.setmode(2)
@@ -194,12 +202,14 @@ for epoch in range(nepochs):
         probs = inference(epoch, val_loader, model)
         maxs = group_max(np.array(val_dset.slideIDX), probs, len(val_dset.targets))
         pred = [1 if x >= 0.5 else 0 for x in maxs]
+        auc = roc_auc_score(val_dset.targets, pred)
         err,fpr,fnr = calc_err(pred, val_dset.targets)
-        print('Validation\tEpoch: [{}/{}]\tError: {}\tFPR: {}\tFNR: {}'.format(epoch+1, nepochs, err, fpr, fnr))
-        fconv = open(os.path.join(output, 'convergence_3.csv'), 'a')
+        print('Validation\tEpoch: [{}/{}]\tError: {}\tFPR: {}\tFNR: {}\tAUC: {}'.format(epoch+1, nepochs, err, fpr, fnr, auc))
+        fconv = open(os.path.join(output, 'convergence.csv'), 'a')
         fconv.write('{},error,{}\n'.format(epoch+1, err))
         fconv.write('{},fpr,{}\n'.format(epoch+1, fpr))
         fconv.write('{},fnr,{}\n'.format(epoch+1, fnr))
+        fconv.write('{},auc,{}\n'.format(epoch + 1, auc))
         fconv.close()
         #Save best model
         err = (fpr+fnr)/2.
@@ -211,4 +221,4 @@ for epoch in range(nepochs):
                 'best_acc': best_acc,
                 'optimizer' : optimizer.state_dict()
             }
-            torch.save(obj, os.path.join(output,'checkpoint_best_3.pth'))
+            torch.save(obj, os.path.join(output,'checkpoint_best.pth'))
