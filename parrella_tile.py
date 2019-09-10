@@ -9,7 +9,6 @@ import multiprocessing
 
 grid_size = 224
 ratio = 0.1
-data_directory = '/Users/xiaoying/Downloads/CMELYON16'
 
 def simple_tile(image_path, resolution):
     # just use grids to tile the slide, return a image list
@@ -68,7 +67,7 @@ def cal_var(histogram, threshold):
         var_back = 0
     var_fore = fore.var()
     if fore.shape[0] == 0:
-        fore.back = 0
+        var_fore = 0
     var = (var_back * back.shape[0] + var_fore * fore.shape[0]) / (back.shape[0] + fore.shape[0])
     end = time.time()
     return var
@@ -92,7 +91,7 @@ def very_simple_tile(image_path):
     whole_image = cv2.cvtColor(whole_image, cv2.COLOR_BGR2GRAY)
     histogram = whole_image.flatten()
     var = []
-    for i in range(256):
+    for i in range(0, 256):
         if i != 0:
             var.append(cal_var(histogram, i))
     minvar = min(var)
@@ -103,6 +102,8 @@ def select_grids(threshold, image_path, resolution):
     # use the original image to get the grid contain tissues
     now_grids = []
     slide = OpenSlide(image_path)
+    if resolution >= slide.level_count:
+        resolution = slide.level_count - 1
     slide_width = slide.level_dimensions[resolution][0]
     slide_height = slide.level_dimensions[resolution][1]
     grid_number_x = slide_width // grid_size + 1
@@ -132,22 +133,25 @@ def create_lib(image_directory, category, resolution):
     mult = []
     level = []
     for image_path in os.listdir(image_directory):
-        image_path = '/notebooks/19_ZZQ/CAMELYON16_data/train_data/' + image_path
+        image_path = image_directory  + '/' + image_path
+        print(image_path)
         slides.append(image_path)
         threshold = very_simple_tile(image_path)
         now_grids = select_grids(threshold, image_path, resolution)
-        print('now_grids = ', now_grids)
         grids.append(now_grids)
         if 'tumor' in image_path:
             targets.append(1)
         if 'normal' in image_path:
             targets.append(0)
-        mult.append(0)
+        mult.append(1)
         level.append(resolution)
-    dictory = {'slides': slides, 'grids': grids, 'targets': targets, 'mult': mult, 'level': level}
+        print(image_path + ' has been processed')
+    dictory = {'slides': slides, 'grid': grids, 'targets': targets, 'mult': mult, 'level': level}
     torch.save(dictory, category + '_' + str(resolution) + '.pki')
 train_image_directory = '/notebooks/19_ZZQ/CAMELYON16_data/train_data'
-val_image_directory = '/notebooks/19_ZZQ/CAMELYON16_data/train_data'
-create_lib(train_image_directory, 'train', 8)
-create_lib(val_image_directory, 'val', 8)
+val_image_directory = '/notebooks/19_ZZQ/CAMELYON16_data/val_data'
+test_image_directory = '/notebooks/19_ZZQ/CAMELYON16_data/test_data'
+create_lib(train_image_directory, 'train', 3)
+create_lib(val_image_directory, 'val', 3)
+create_lib(test_image_directory, 'test', 3)
 print('completed')
